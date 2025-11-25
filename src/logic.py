@@ -165,7 +165,6 @@ class SheetsClient:
         if not updates: return
         sh = self._open_sheet(spreadsheet_id)
         ws = sh.worksheet(worksheet_title)
-        # Range construction for batch update
         data = [{"range": f"'{ws.title}'!{a1_cell(r, c)}", "values": [[str(v) if v is not None else ""]]} for r, c, v in updates]
         self._retry_api(ws.spreadsheet.values_batch_update, body={"valueInputOption": "USER_ENTERED", "data": data})
 
@@ -245,3 +244,70 @@ def compare_two_sheets(s_h, s_r, t_h, t_r, key_h, included_h):
                 diffs.append((h, sv, tv, src_key2idx[k], tgt_key2idx[k], sc, tc))
         if diffs: res.differences[k] = diffs
     return res
+
+def check_color_status(result: CompareResult, current_formats: List[Dict], t_h: List[str], included_h: List[str]) -> List[str]:
+    """
+    Checks two conditions:
+    1. Missing Color: A cell has a data difference but is WHITE.
+    2. False Positive: A cell is COLORED but has NO data difference (data matches).
+    
+    Only checks within the 'included_h' columns to avoid flagging unrelated manual formatting.
+    """
+    report = []
+    
+    # 1. Identify all colored cells in the sheet (that fall under 'included_h')
+    # Set of (row_0based, col_0based)
+    actually_colored_cells = set() 
+    
+    tgt_hmap = {h: i for i, h in enumerate(t_h)}
+    included_col_indices = {tgt_hmap[h] for h in included_h if h in tgt_hmap}
+
+    # Parse current_formats (starts from row index 1, because header is row 0)
+    for r_offset, row_data in enumerate(current_formats):
+        real_row_idx = r_offset + 1 
+        if 'values' not in row_data: continue
+        
+        for c_idx, cell_data in enumerate(row_data['values']):
+            if c_idx not in included_col_indices: continue # Skip columns we aren't comparing
+            
+            if not cell_data or 'effectiveFormat' not in cell_data: continue
+            color = cell_data['effectiveFormat'].get('backgroundColor')
+            if not is_white(color):
+                actually_colored_cells.add((real_row_idx, c_idx))
+
+    # 2. Identify all cells that SHOULD be colored (Data differences)
+    should_be_colored = set()
+    # Map needed for reporting False Positives later: (row, col) -> (Key, Header)
+    cell_info_map = {} 
+
+    # Populate from result.differences
+    for key_val, diffs in result.differences.items():
+        for h, s_val, t_val, s_row, t_row, s_col, t_col in diffs:
+            # t_row is 1-based
+            target_row_0based = t_row - 1
+            target_col_0based = t_col
+            
+            coord = (target_row_0based, target_col_0based)
+            should_be_colored.add(coord)
+            
+            # Check for MISSING COLOR immediately
+            if coord not in actually_colored_cells:
+                 cell_ref = a1_cell(target_row_0based, target_col_0based)
+                 report.append(f"[MISSING COLOR] Cell {cell_ref} (Row {t_row}, {h}): Has difference but is WHITE.")
+
+    # 3. Check for FALSE POSITIVES (Colored but shouldn't be)
+    # We iterate through all colored cells found in the "Columns to Compare"
+    for coord in actually_colored_cells:
+        if coord not in should_be_colored:
+            row_idx, col_idx = coord
+            cell_ref = a1_cell(row_idx, col_idx)
+            
+            # Try to find header name for report
+            header_name = t_h[col_idx] if col_idx < len(t_h) else f"Col {col_idx}"
+            
+            report.append(f"[FALSE POSITIVE] Cell {cell_ref} (Row {row_idx+1}, {header_name}): Is COLORED but data matches.")
+
+    if not report:
+        return ["Colors are perfectly synced with data differences."]
+        
+    return sorted(report)

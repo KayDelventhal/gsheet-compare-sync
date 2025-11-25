@@ -18,7 +18,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtGui import QPixmap, QColor
 
 from src.logic import (
-    SheetsClient, TSVClient, compare_two_sheets, 
+    SheetsClient, TSVClient, compare_two_sheets, check_color_status,
     WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white
 )
 
@@ -105,9 +105,9 @@ class CompareSyncUI(QWidget):
         self.tgt_dim_colors_btn = QPushButton("Dim Target Colors")
         
         self.check_btn = QPushButton("Check Diffs")
-        self.check_color_btn = QPushButton("Check Color")
-        self.highlight_btn = QPushButton("Color Diffs")
-        self.sync_btn = QPushButton("Sync & Color")
+        self.check_color_btn = QPushButton("Check Colors")
+        self.highlight_btn = QPushButton("Color all Diffs")
+        self.sync_btn = QPushButton("Sync Data and Color")
         
         self.report = QTextEdit(readOnly=True)
         self.report_clear_btn = QPushButton("Clear")
@@ -124,7 +124,6 @@ class CompareSyncUI(QWidget):
         cred_row.addWidget(self.cred_edit)
         cred_row.addWidget(self.cred_btn)
         cred_row.addWidget(self.connect_btn)
-        # Load/Save All moved out from here
         config_layout.addRow("Credentials JSON:", cred_row)
         root_layout.addWidget(config_box)
 
@@ -169,13 +168,6 @@ class CompareSyncUI(QWidget):
         tgt_layout.addRow(tgt_color_row)
         main_splitter.addWidget(tgt_box)
         
-        # --- Load/Save All Buttons (Middle Section) ---
-        #middle_btn_layout = QHBoxLayout()
-        #middle_btn_layout.addStretch(1)
-        #middle_btn_layout.addWidget(self.load_all)
-        #middle_btn_layout.addWidget(self.save_all)
-        #root_layout.addLayout(middle_btn_layout)
-
         # Keys & Columns Box
         key_box = QGroupBox("Key & Columns")
         key_layout = QVBoxLayout(key_box) # Changed to VBox for custom rows
@@ -184,7 +176,6 @@ class CompareSyncUI(QWidget):
         header_ctrl_layout = QHBoxLayout()
         header_ctrl_layout.addWidget(QLabel("Row Key Header:"))
         header_ctrl_layout.addWidget(self.key_header, 2) # Give key header more space
-        #header_ctrl_layout.addSpacing(20)
         header_ctrl_layout.addStretch(1)
         header_ctrl_layout.addWidget(QLabel("Update Marker Column:"))
         header_ctrl_layout.addWidget(self.update_marker_combo, 2)
@@ -195,7 +186,6 @@ class CompareSyncUI(QWidget):
         key_layout.addLayout(header_ctrl_layout)
         
         # Columns Grid
-        #key_layout.addWidget(QLabel("Columns to Compare:"))
         key_layout.addWidget(self.compare_list)
         
         root_layout.addWidget(key_box)
@@ -243,7 +233,7 @@ class CompareSyncUI(QWidget):
         self.tgt_dim_colors_btn.clicked.connect(lambda: self._dim_colors("target"))
         
         self.check_btn.clicked.connect(self._check_only)
-        self.check_color_btn.clicked.connect(lambda: self._run(sync=False))
+        self.check_color_btn.clicked.connect(self._check_color_only)
         self.highlight_btn.clicked.connect(lambda: self._run(sync=False))
         self.sync_btn.clicked.connect(lambda: self._run(sync=True))
         
@@ -423,6 +413,38 @@ class CompareSyncUI(QWidget):
             self.report.append(result.to_report())
             QMessageBox.information(self, "Check Complete", "Comparison finished. No changes made.")
             self._save_ui_state()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
+    def _check_color_only(self):
+        """Calculates differences and checks if they are colored in Target."""
+        self.busy.emit(True)
+        try:
+            key, included, _, _, tid, ttab, _, _ = self._get_run_params()
+            
+            # 1. Calculate differences (Data comparison)
+            s_h, s_r = self._load_table("source")
+            t_h, t_r = self._load_table("target")
+            result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
+            
+            # 2. Fetch current colors from Target
+            current_formats = self.client.fetch_formats(tid, ttab)
+            
+            # 3. Compare actual colors vs expected colors
+            # Passing 'included' columns so we ignore colors in other unrelated columns
+            color_report = check_color_status(result, current_formats, t_h, included)
+            
+            # 4. Report
+            self.report.append("\n=== Color Check Report ===")
+            self.report.append("\n".join(color_report))
+            self.report.append("==========================\n")
+            
+            QMessageBox.information(self, "Color Check Complete", "Check the report window for details.")
+            self._save_ui_state()
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             self._set_status_color("red")
