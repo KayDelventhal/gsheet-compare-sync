@@ -104,7 +104,7 @@ def is_white(color: Optional[Dict[str, float]]) -> bool:
     r = color.get('red', 0.0)
     g = color.get('green', 0.0)
     b = color.get('blue', 0.0)
-    return r > 0.99 and g > 0.99 and b > 0.99
+    return r > 0.9 and g > 0.9 and b > 0.9
 
 # --- Clients ---
 
@@ -146,7 +146,11 @@ class SheetsClient:
         ws = sh.worksheet(worksheet_title)
         end_col = gspread.utils.rowcol_to_a1(1, ws.col_count).rstrip('1')
         fetch_range = f"'{worksheet_title}'!A2:{end_col}"
-        params = {'ranges': fetch_range, 'fields': 'sheets.data.rowData.values.effectiveFormat.backgroundColor'}
+        params = {
+            'ranges': fetch_range,
+            'includeGridData': True,  # Required to actually return rowData/effectiveFormat
+            'fields': 'sheets.data(startRow,startColumn,rowData.values.effectiveFormat.backgroundColor)',
+        }
         try:
             meta = self._retry_api(sh.fetch_sheet_metadata, params=params)
             if 'sheets' in meta and meta['sheets'] and 'data' in meta['sheets'][0] and meta['sheets'][0]['data']:
@@ -187,6 +191,7 @@ class CompareResult:
         self.compared_headers: List[str] = []
         # Dict[key, List[Tuple[header, s_val, t_val, s_row_idx, t_row_idx, s_col_idx, t_col_idx]]]
         self.differences: Dict[str, List[Tuple[str, Any, Any, int, int, int, int]]] = {}
+        self.row_mapping: Dict[str, Tuple[int, int]] = {} # Key -> (s_row, t_row)
 
     def to_report(self) -> str:
         lines = []
@@ -235,13 +240,15 @@ def compare_two_sheets(s_h, s_r, t_h, t_r, key_h, included_h):
 
     for k in sorted(src_keys & tgt_keys):
         srow, trow = src_key2vals[k], tgt_key2vals[k]
+        srow_idx, trow_idx = src_key2idx[k], tgt_key2idx[k]
+        res.row_mapping[k] = (srow_idx, trow_idx)
         diffs = []
         for h in common_headers:
             sc, tc = src_hmap[h], tgt_hmap[h]
             sv = srow[sc] if sc < len(srow) else ""
             tv = trow[tc] if tc < len(trow) else ""
             if normalize_cell(sv) != normalize_cell(tv):
-                diffs.append((h, sv, tv, src_key2idx[k], tgt_key2idx[k], sc, tc))
+                diffs.append((h, sv, tv, srow_idx, trow_idx, sc, tc))
         if diffs: res.differences[k] = diffs
     return res
 
@@ -297,17 +304,83 @@ def check_color_status(result: CompareResult, current_formats: List[Dict], t_h: 
 
     # 3. Check for FALSE POSITIVES (Colored but shouldn't be)
     # We iterate through all colored cells found in the "Columns to Compare"
-    for coord in actually_colored_cells:
-        if coord not in should_be_colored:
-            row_idx, col_idx = coord
-            cell_ref = a1_cell(row_idx, col_idx)
-            
-            # Try to find header name for report
-            header_name = t_h[col_idx] if col_idx < len(t_h) else f"Col {col_idx}"
-            
-            report.append(f"[FALSE POSITIVE] Cell {cell_ref} (Row {row_idx+1}, {header_name}): Is COLORED but data matches.")
+    # REMOVED per user request: We only want to know if diffs are NOT colored.
+    # We do not care if non-diffs ARE colored (stale colors).
+    
 
     if not report:
         return ["Colors are perfectly synced with data differences."]
         
+    return sorted(report)
+
+def get_bg_color(row_data: Dict, col_idx: int) -> Optional[Dict]:
+    if 'values' not in row_data: return None
+    vals = row_data['values']
+    if col_idx >= len(vals): return None
+    cell = vals[col_idx]
+    if not cell or 'effectiveFormat' not in cell: return None
+    return cell['effectiveFormat'].get('backgroundColor')
+
+def get_color_tuple(c: Optional[Dict]) -> Tuple[float, float, float]:
+    if not c: return (1.0, 1.0, 1.0) # Default to white if missing
+    return (c.get('red', 0.0), c.get('green', 0.0), c.get('blue', 0.0))
+
+def colors_match(c1: Optional[Dict], c2: Optional[Dict], tolerance: float = 0.03) -> bool:
+    # 1. Handle White/None equivalence
+    w1 = is_white(c1)
+    w2 = is_white(c2)
+    if w1 and w2: return True
+    if w1 != w2: return False
+    
+    # 2. Compare RGB components
+    r1, g1, b1 = get_color_tuple(c1)
+    r2, g2, b2 = get_color_tuple(c2)
+    
+    return (abs(r1 - r2) <= tolerance and 
+            abs(g1 - g2) <= tolerance and 
+            abs(b1 - b2) <= tolerance)
+
+def compare_sheet_colors(result: CompareResult, s_formats: List[Dict], t_formats: List[Dict], s_h: List[str], t_h: List[str], included_h: List[str]) -> List[str]:
+    report = []
+    src_hmap = {h: i for i, h in enumerate(s_h)}
+    tgt_hmap = {h: i for i, h in enumerate(t_h)}
+    
+    for key, (s_row, t_row) in result.row_mapping.items():
+        # s_row, t_row are 1-based indices (1=Header, 2=First Data Row)
+        # formats list starts from Data Row 1 (which is index 0 in list)
+        s_idx = s_row - 2
+        t_idx = t_row - 2
+        
+        if s_idx < 0 or s_idx >= len(s_formats): continue
+        if t_idx < 0 or t_idx >= len(t_formats): continue
+        
+        s_row_data = s_formats[s_idx]
+        t_row_data = t_formats[t_idx]
+        
+        for h in included_h:
+            if h not in src_hmap or h not in tgt_hmap: continue
+            s_col = src_hmap[h]
+            t_col = tgt_hmap[h]
+            
+            s_color = get_bg_color(s_row_data, s_col)
+            t_color = get_bg_color(t_row_data, t_col)
+            
+            if not colors_match(s_color, t_color):
+                cell_ref = a1_cell(t_row - 1, t_col)
+                
+                s_white = is_white(s_color)
+                t_white = is_white(t_color)
+                
+                if s_white and not t_white:
+                    desc = "Source is White, Target is Colored"
+                elif not s_white and t_white:
+                    desc = "Source is Colored, Target is White"
+                else:
+                    # Both colored but different
+                    sr, sg, sb = get_color_tuple(s_color)
+                    tr, tg, tb = get_color_tuple(t_color)
+                    desc = f"RGB Mismatch: Src({sr:.2f},{sg:.2f},{sb:.2f}) vs Tgt({tr:.2f},{tg:.2f},{tb:.2f})"
+                
+                report.append(f"[COLOR DIFF] Cell {cell_ref} (Row {t_row}, {h}): {desc}")
+                    
     return sorted(report)

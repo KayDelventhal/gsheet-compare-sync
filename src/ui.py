@@ -18,7 +18,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtGui import QPixmap, QColor
 
 from src.logic import (
-    SheetsClient, TSVClient, compare_two_sheets, check_color_status,
+    SheetsClient, TSVClient, compare_two_sheets, check_color_status, compare_sheet_colors,
     WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white
 )
 
@@ -140,10 +140,6 @@ class CompareSyncUI(QWidget):
         sheet_layout.addRow("Spreadsheet ID:", self.src_id)
         sheet_layout.addRow("Worksheet:", self.src_list)
         sheet_layout.addRow(self.load_src_btn)
-        src_color_row = QHBoxLayout()
-        src_color_row.addWidget(self.src_clear_colors_btn)
-        src_color_row.addWidget(self.src_dim_colors_btn)
-        sheet_layout.addRow(src_color_row)
         src_layout.addRow(self.src_sheet_widgets)
         
         self.src_file_widgets = QWidget()
@@ -162,10 +158,6 @@ class CompareSyncUI(QWidget):
         tgt_layout.addRow("Spreadsheet ID:", self.tgt_id)
         tgt_layout.addRow("Worksheet:", self.tgt_list)
         tgt_layout.addRow(self.load_tgt_btn)
-        tgt_color_row = QHBoxLayout()
-        tgt_color_row.addWidget(self.tgt_clear_colors_btn)
-        tgt_color_row.addWidget(self.tgt_dim_colors_btn)
-        tgt_layout.addRow(tgt_color_row)
         main_splitter.addWidget(tgt_box)
         
         # Keys & Columns Box
@@ -192,14 +184,28 @@ class CompareSyncUI(QWidget):
         
         # Actions
         main_action_box = QGroupBox("Main Actions")
-        main_action_layout = QHBoxLayout(main_action_box)
-        main_action_layout.addWidget(QLabel("Base Color:"))
-        main_action_layout.addWidget(self.base_color_combo)
-        main_action_layout.addStretch(1)
-        main_action_layout.addWidget(self.check_btn)
-        main_action_layout.addWidget(self.check_color_btn)
-        main_action_layout.addWidget(self.highlight_btn)
-        main_action_layout.addWidget(self.sync_btn)
+        main_action_layout = QVBoxLayout(main_action_box)
+        
+        # Row 1: Color Management (Clear/Dim)
+        color_mgmt_row = QHBoxLayout()
+        color_mgmt_row.addWidget(self.src_clear_colors_btn)
+        color_mgmt_row.addWidget(self.src_dim_colors_btn)
+        color_mgmt_row.addStretch(1) # Spacer between Source and Target buttons
+        color_mgmt_row.addWidget(self.tgt_clear_colors_btn)
+        color_mgmt_row.addWidget(self.tgt_dim_colors_btn)
+        main_action_layout.addLayout(color_mgmt_row)
+
+        # Row 2: Main Operations
+        ops_row = QHBoxLayout()
+        ops_row.addWidget(QLabel("Base Color:"))
+        ops_row.addWidget(self.base_color_combo)
+        ops_row.addStretch(1)
+        ops_row.addWidget(self.check_btn)
+        ops_row.addWidget(self.check_color_btn)
+        ops_row.addWidget(self.highlight_btn)
+        ops_row.addWidget(self.sync_btn)
+        main_action_layout.addLayout(ops_row)
+        
         root_layout.addWidget(main_action_box)
 
         # Report
@@ -437,6 +443,16 @@ class CompareSyncUI(QWidget):
             # Passing 'included' columns so we ignore colors in other unrelated columns
             color_report = check_color_status(result, current_formats, t_h, included)
             
+            # NEW: 4. If Source is Sheet, compare Source Colors vs Target Colors
+            if self.src_type.currentText() == "Google Sheet":
+                 sid, stab = self.src_id.text().strip(), self.src_list.currentText()
+                 src_formats = self.client.fetch_formats(sid, stab)
+                 # Compare src_formats vs current_formats (target)
+                 color_diff_report = compare_sheet_colors(result, src_formats, current_formats, s_h, t_h, included)
+                 if color_diff_report:
+                     color_report.append("\n--- Source vs Target Color Mismatches ---")
+                     color_report.extend(color_diff_report)
+
             # 4. Report
             self.report.append("\n=== Color Check Report ===")
             self.report.append("\n".join(color_report))
@@ -614,7 +630,7 @@ class CompareSyncUI(QWidget):
                 return
 
             color_requests = []
-            for r_idx, row_data in enumerate(all_row_data[1:], start=1):
+            for r_idx, row_data in enumerate(all_row_data, start=1):
                 if 'values' not in row_data: continue
                 for c_idx, cell_data in enumerate(row_data['values']):
                     if not cell_data or 'effectiveFormat' not in cell_data: continue

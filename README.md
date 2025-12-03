@@ -17,19 +17,25 @@ A PySide6 Desktop application to compare a Source (Google Sheet or TSV) with a T
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
-3. **bash**: python -m src.main
+   ```
+3. Run the application:
+   ```bash
+   python main.py
+   ```
    
 ## Run the application
 
-1. Configuration: Load your Service Account JSON.
-3. Source: Select a Google Sheet tab or a TSV file.
-4. Target: Select a Google Sheet tab.
-5. Keys & Columns:
+1. **Configuration**: Load your Service Account JSON.
+2. **Source**: Select a Google Sheet tab or a TSV file.
+3. **Target**: Select a Google Sheet tab.
+4. **Keys & Columns**:
    - Click "Load Headers".
-   - Select the unique Row Key (e.g., ID).
-   - Select the Marker Column to update on sync.
+   - Select the unique **Row Key** (e.g., ID).
+   - Select the **Update Marker Column** (optional) to update on sync.
    - Check the columns you want to compare.
-6. Actions:
-   - Check Diffs: Generates a text report.
-   - Color Diffs: Highlights changes in the sheet.
-   - Sync & Color: Updates data and highlights changes.
+5. **Main Actions**:
+   - **Color Management**: Clear or Dim colors in Source/Target to prepare for a new pass.
+   - **Check Diffs**: Generates a text report of data differences.
+   - **Check Colors**: Checks if colored cells match the data differences (and compares Source vs Target colors).
+   - **Color Diffs**: Highlights data differences in the sheet.
+   - **Sync & Color**: Updates data in Target and highlights changes.
