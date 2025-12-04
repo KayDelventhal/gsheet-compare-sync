@@ -19,7 +19,7 @@ from PySide6.QtGui import QPixmap, QColor
 
 from src.logic import (
     SheetsClient, TSVClient, compare_two_sheets, check_color_status, compare_sheet_colors,
-    WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white
+    WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white, label_current_revision
 )
 
 # --- Constants ---
@@ -104,9 +104,16 @@ class CompareSyncUI(QWidget):
         self.tgt_clear_colors_btn = QPushButton("Clear Target Colors")
         self.tgt_dim_colors_btn = QPushButton("Dim Target Colors")
         
+        self.snapshot_btn = QPushButton("Snapshot Tab")
+        self.backup_btn = QPushButton("Create Version")
+        
         self.check_btn = QPushButton("Check Diffs")
+        self.check_rows_btn = QPushButton("Check Rows")
+        self.check_cols_btn = QPushButton("Check Cols")
         self.check_color_btn = QPushButton("Check Colors")
         self.highlight_btn = QPushButton("Color all Diffs")
+        self.sync_data_btn = QPushButton("Sync Data")
+        self.sync_color_btn = QPushButton("Sync Color")
         self.sync_btn = QPushButton("Sync Data and Color")
         
         self.report = QTextEdit(readOnly=True)
@@ -182,6 +189,14 @@ class CompareSyncUI(QWidget):
         
         root_layout.addWidget(key_box)
         
+        # Version/Snapshot Controls
+        version_box = QGroupBox("Versioning")
+        version_layout = QHBoxLayout(version_box)
+        version_layout.addWidget(self.snapshot_btn)
+        version_layout.addWidget(self.backup_btn)
+        
+        root_layout.addWidget(version_box)
+        
         # Actions
         main_action_box = QGroupBox("Main Actions")
         main_action_layout = QVBoxLayout(main_action_box)
@@ -190,19 +205,25 @@ class CompareSyncUI(QWidget):
         color_mgmt_row = QHBoxLayout()
         color_mgmt_row.addWidget(self.src_clear_colors_btn)
         color_mgmt_row.addWidget(self.src_dim_colors_btn)
-        color_mgmt_row.addStretch(1) # Spacer between Source and Target buttons
+        
+        color_mgmt_row.addStretch(1)
+        color_mgmt_row.addWidget(QLabel("Base Color:"))
+        color_mgmt_row.addWidget(self.base_color_combo)
+        color_mgmt_row.addStretch(1)
+        
         color_mgmt_row.addWidget(self.tgt_clear_colors_btn)
         color_mgmt_row.addWidget(self.tgt_dim_colors_btn)
         main_action_layout.addLayout(color_mgmt_row)
 
         # Row 2: Main Operations
         ops_row = QHBoxLayout()
-        ops_row.addWidget(QLabel("Base Color:"))
-        ops_row.addWidget(self.base_color_combo)
-        ops_row.addStretch(1)
         ops_row.addWidget(self.check_btn)
+        ops_row.addWidget(self.check_rows_btn)
+        ops_row.addWidget(self.check_cols_btn)
         ops_row.addWidget(self.check_color_btn)
         ops_row.addWidget(self.highlight_btn)
+        ops_row.addWidget(self.sync_data_btn)
+        ops_row.addWidget(self.sync_color_btn)
         ops_row.addWidget(self.sync_btn)
         main_action_layout.addLayout(ops_row)
         
@@ -237,11 +258,17 @@ class CompareSyncUI(QWidget):
         self.tgt_clear_colors_btn.clicked.connect(lambda: self._clear_colors("target"))
         self.src_dim_colors_btn.clicked.connect(lambda: self._dim_colors("source"))
         self.tgt_dim_colors_btn.clicked.connect(lambda: self._dim_colors("target"))
+        self.snapshot_btn.clicked.connect(self._snapshot_tab)
+        self.backup_btn.clicked.connect(self._create_version)
         
+        self.check_rows_btn.clicked.connect(self._check_rows_only)
+        self.check_cols_btn.clicked.connect(self._check_cols_only)
         self.check_btn.clicked.connect(self._check_only)
         self.check_color_btn.clicked.connect(self._check_color_only)
-        self.highlight_btn.clicked.connect(lambda: self._run(sync=False))
-        self.sync_btn.clicked.connect(lambda: self._run(sync=True))
+        self.highlight_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True))
+        self.sync_data_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=False))
+        self.sync_color_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True))
+        self.sync_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=True))
         
         self.report_clear_btn.clicked.connect(self.report.clear)
         self.log_load_btn.clicked.connect(self._load_log_file)
@@ -409,6 +436,70 @@ class CompareSyncUI(QWidget):
 
         return key, included, sid, stab, tid, ttab, is_source_sheet, update_marker_col
 
+    def _check_rows_only(self):
+        self.busy.emit(True)
+        try:
+            key, included, _, _, _, _, _, _ = self._get_run_params()
+            s_h, s_r = self._load_table("source")
+            t_h, t_r = self._load_table("target")
+            result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
+            
+            report = []
+            if result.missing_rows_in_target:
+                report.append(f"Additional Rows in SOURCE ({len(result.missing_rows_in_target)}):")
+                report.extend([f"  - {k}" for k in result.missing_rows_in_target])
+            else:
+                report.append("No additional rows in Source.")
+                
+            if result.missing_rows_in_source:
+                report.append(f"\nAdditional Rows in TARGET ({len(result.missing_rows_in_source)}):")
+                report.extend([f"  - {k}" for k in result.missing_rows_in_source])
+            else:
+                report.append("\nNo additional rows in Target.")
+                
+            self.report.append("\n=== Row Check Report ===")
+            self.report.append("\n".join(report))
+            self.report.append("========================\n")
+            QMessageBox.information(self, "Row Check Complete", "Check report for details.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
+    def _check_cols_only(self):
+        self.busy.emit(True)
+        try:
+            key, included, _, _, _, _, _, _ = self._get_run_params()
+            s_h, s_r = self._load_table("source")
+            t_h, t_r = self._load_table("target")
+            result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
+            
+            report = []
+            if result.missing_columns_in_target:
+                report.append(f"Additional Columns in SOURCE ({len(result.missing_columns_in_target)}):")
+                report.extend([f"  - {c}" for c in result.missing_columns_in_target])
+            else:
+                report.append("No additional columns in Source.")
+                
+            if result.missing_columns_in_source:
+                report.append(f"\nAdditional Columns in TARGET ({len(result.missing_columns_in_source)}):")
+                report.extend([f"  - {c}" for c in result.missing_columns_in_source])
+            else:
+                report.append("\nNo additional columns in Target.")
+                
+            self.report.append("\n=== Column Check Report ===")
+            self.report.append("\n".join(report))
+            self.report.append("===========================\n")
+            QMessageBox.information(self, "Column Check Complete", "Check report for details.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
     def _check_only(self):
         self.busy.emit(True)
         try:
@@ -417,7 +508,10 @@ class CompareSyncUI(QWidget):
             t_h, t_r = self._load_table("target")
             result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
             self.report.append(result.to_report())
+            
+            msg = f"Checked differences. Found {len(result.differences)} rows with differences."
             QMessageBox.information(self, "Check Complete", "Comparison finished. No changes made.")
+            self._write_log(msg)
             self._save_ui_state()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
@@ -459,6 +553,7 @@ class CompareSyncUI(QWidget):
             self.report.append("==========================\n")
             
             QMessageBox.information(self, "Color Check Complete", "Check the report window for details.")
+            self._write_log(f"Checked colors. Found {len(color_report)} issues.")
             self._save_ui_state()
             
         except Exception as e:
@@ -467,7 +562,7 @@ class CompareSyncUI(QWidget):
         finally:
             self.busy.emit(False)
 
-    def _run(self, sync: bool):
+    def _run(self, sync_data: bool, sync_color: bool):
         self.busy.emit(True)
         try:
             key, included, sid, stab, tid, ttab, is_source_sheet, update_marker_col = self._get_run_params()
@@ -507,14 +602,15 @@ class CompareSyncUI(QWidget):
                 t_row_idx = diffs[0][4]
                 
                 for h, s_val, t_val, _, _, s_col, t_col in diffs:
-                    if sync:
+                    if sync_data:
                         value_updates.append((t_row_idx - 1, t_col, s_val))
                         row_log_entries.append(f"  - {h}: '{t_val}' -> '{s_val}'")
 
-                    tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, t_row_idx - 1, t_col, base_color))
+                    if sync_color:
+                        tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, t_row_idx - 1, t_col, base_color))
 
-                    if is_source_sheet:
-                        src_color_reqs.append(self._create_color_request(src_sheet_id, s_row_idx - 1, s_col, base_color))
+                        if is_source_sheet:
+                            src_color_reqs.append(self._create_color_request(src_sheet_id, s_row_idx - 1, s_col, base_color))
                 
                 # Handle Update Marker
                 if update_marker_col:
@@ -525,39 +621,46 @@ class CompareSyncUI(QWidget):
                         marker_col_idx = tgt_header_map[update_marker_col]
                         marker_row_0 = t_row_idx - 1
                         
-                        if sync:
+                        if sync_data:
                             value_updates.append((marker_row_0, marker_col_idx, marker_text))
                             row_log_entries.append(f"  - {update_marker_col} (Target): Set to '{marker_text}'")
                         
-                        tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, marker_row_0, marker_col_idx, base_color))
+                        if sync_color:
+                            tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, marker_row_0, marker_col_idx, base_color))
 
                     # 2. Source Update (Decoupled from target check)
                     if is_source_sheet and update_marker_col in src_header_map:
                         marker_col_idx = src_header_map[update_marker_col]
                         marker_row_0 = s_row_idx - 1
                         
-                        if sync:
+                        if sync_data:
                             src_value_updates.append((marker_row_0, marker_col_idx, marker_text))
                             row_log_entries.append(f"  - {update_marker_col} (Source): Set to '{marker_text}'")
                             
-                        src_color_reqs.append(self._create_color_request(src_sheet_id, marker_row_0, marker_col_idx, base_color))
+                        if sync_color:
+                            src_color_reqs.append(self._create_color_request(src_sheet_id, marker_row_0, marker_col_idx, base_color))
 
                 if row_log_entries:
                     log_entries.append(f"Row [{key_val}]:\n" + "\n".join(row_log_entries))
 
-            if sync: 
+            if sync_data: 
                 self.client.batch_update_values(tid, ttab, value_updates)
                 if src_value_updates:
                     self.client.batch_update_values(sid, stab, src_value_updates)
 
-            if tgt_color_reqs: self.client.batch_update(tid, {'requests': tgt_color_reqs})
-            if src_color_reqs: self.client.batch_update(sid, {'requests': src_color_reqs})
+            if sync_color:
+                if tgt_color_reqs: self.client.batch_update(tid, {'requests': tgt_color_reqs})
+                if src_color_reqs: self.client.batch_update(sid, {'requests': src_color_reqs})
 
-            action = "Synced & Colored" if sync else "Colored"
+            action_parts = []
+            if sync_data: action_parts.append("Synced")
+            if sync_color: action_parts.append("Colored")
+            action = " & ".join(action_parts) if action_parts else "Checked"
+            
             summary_message = f"{action} {len(result.differences)} rows with differences."
             QMessageBox.information(self, "Run Complete", summary_message)
             
-            if sync and log_entries:
+            if sync_data and log_entries:
                 log_header = f"Ran 'Sync' on {len(log_entries)} rows."
                 self._write_log(f"{log_header}\n{'\n'.join(log_entries)}")
             else:
@@ -570,8 +673,109 @@ class CompareSyncUI(QWidget):
         finally:
             self.busy.emit(False)
 
+    def _snapshot_tab(self):
+        if not self._ensure_client(): return
+        self.busy.emit(True)
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            suffix = f"_v{timestamp}"
+            
+            log_messages = []
+            
+            # Target
+            tid, ttab = self.tgt_id.text().strip(), self.tgt_list.currentText()
+            if tid and ttab:
+                new_ttab = f"{ttab}{suffix}"
+                try:
+                    self.client.duplicate_worksheet(tid, ttab, new_ttab)
+                    log_messages.append(f"Snapshot of Target '{ttab}' saved as '{new_ttab}'")
+                except Exception as e:
+                    if "WorksheetNotFound" in str(type(e).__name__) or "WorksheetNotFound" in str(e):
+                         QMessageBox.warning(self, "Snapshot Error", f"Target worksheet '{ttab}' not found. Please reload tabs.")
+                    else:
+                         raise e
+            
+            # Source
+            if self.src_type.currentText() == "Google Sheet":
+                sid, stab = self.src_id.text().strip(), self.src_list.currentText()
+                if sid and stab:
+                    new_stab = f"{stab}{suffix}"
+                    try:
+                        self.client.duplicate_worksheet(sid, stab, new_stab)
+                        log_messages.append(f"Snapshot of Source '{stab}' saved as '{new_stab}'")
+                    except Exception as e:
+                        if "WorksheetNotFound" in str(type(e).__name__) or "WorksheetNotFound" in str(e):
+                             QMessageBox.warning(self, "Snapshot Error", f"Source worksheet '{stab}' not found. Please reload tabs.")
+                        else:
+                             raise e
+            
+            if log_messages:
+                msg = "\n".join(log_messages)
+                QMessageBox.information(self, "Snapshot Saved", msg)
+                self._write_log(msg)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Snapshot Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
+    def _create_version(self):
+        if not self._ensure_client(): return
+        self.busy.emit(True)
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            label = f"{timestamp}"
+            
+            log_messages = []
+            creds_path = self.cred_edit.text().strip()
+            
+            if not os.path.exists(creds_path):
+                QMessageBox.warning(self, "Credentials Error", f"Credentials file not found: {creds_path}")
+                return
+
+            # Target
+            tid = self.tgt_id.text().strip()
+            if tid:
+                try:
+                    sh = self.client._open_sheet(tid)
+                    label_current_revision(creds_path, sh.id, label)
+                    log_messages.append(f"Created version of Target as '{label}'")
+                except Exception as e:
+                    log_messages.append(f"Failed to create Target version: {e}")
+
+            # Source
+            if self.src_type.currentText() == "Google Sheet":
+                sid = self.src_id.text().strip()
+                if sid:
+                    try:
+                        sh = self.client._open_sheet(sid)
+                        label_current_revision(creds_path, sh.id, label)
+                        log_messages.append(f"Created version of Source as '{label}'")
+                    except Exception as e:
+                        log_messages.append(f"Failed to create Source version: {e}")
+
+            if log_messages:
+                msg = "\n".join(log_messages)
+                QMessageBox.information(self, "Version Created", msg)
+                self._write_log(msg)
+            else:
+                QMessageBox.warning(self, "No Action", "No spreadsheets to create version for.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Version Creation Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
     def _clear_colors(self, kind: str):
         if not self._ensure_client(): return
+        
+        reply = QMessageBox.question(self, "Confirm Clear Colors", 
+                                     f"Are you sure you want to CLEAR all background colors in the {kind} sheet?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes: return
+
         self.busy.emit(True)
         try:
             sid, stab = self.src_id.text().strip(), self.src_list.currentText()
@@ -605,6 +809,12 @@ class CompareSyncUI(QWidget):
 
     def _dim_colors(self, kind: str):
         if not self._ensure_client(): return
+
+        reply = QMessageBox.question(self, "Confirm Dim Colors", 
+                                     f"Are you sure you want to DIM colors in the {kind} sheet?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes: return
+
         self.busy.emit(True)
         try:
             sid, stab = self.src_id.text().strip(), self.src_list.currentText()

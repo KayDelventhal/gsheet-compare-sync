@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple, Any, Optional
 # --- Google Sheets ---
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 # --- Constants ---
 WRITE_DELAY = 0.2
@@ -110,7 +111,7 @@ def is_white(color: Optional[Dict[str, float]]) -> bool:
 
 class SheetsClient:
     def __init__(self, credentials_path: str):
-        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.readonly"]
+        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_file(credentials_path, scopes=scope)
         self.gc = gspread.authorize(creds)
 
@@ -171,6 +172,17 @@ class SheetsClient:
         ws = sh.worksheet(worksheet_title)
         data = [{"range": f"'{ws.title}'!{a1_cell(r, c)}", "values": [[str(v) if v is not None else ""]]} for r, c, v in updates]
         self._retry_api(ws.spreadsheet.values_batch_update, body={"valueInputOption": "USER_ENTERED", "data": data})
+
+    def duplicate_worksheet(self, spreadsheet_id: str, worksheet_title: str, new_title: str):
+        sh = self._open_sheet(spreadsheet_id)
+        ws = sh.worksheet(worksheet_title)
+        # Insert after the current worksheet
+        self._retry_api(ws.duplicate, new_sheet_name=new_title, insert_sheet_index=ws.index + 1)
+
+    def copy_spreadsheet(self, spreadsheet_id: str, title: str):
+        """Copies the entire spreadsheet file."""
+        self.gc.copy(spreadsheet_id, title=title)
+
 
 class TSVClient:
     def fetch_values(self, file_path: str) -> Tuple[List[str], List[List[Any]]]:
@@ -384,3 +396,27 @@ def compare_sheet_colors(result: CompareResult, s_formats: List[Dict], t_formats
                 report.append(f"[COLOR DIFF] Cell {cell_ref} (Row {t_row}, {h}): {desc}")
                     
     return sorted(report)
+
+def label_current_revision(credentials_path: str, file_id: str, label: str):
+    creds = Credentials.from_service_account_file(credentials_path, scopes=[
+        "https://www.googleapis.com/auth/drive"
+    ])
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+    # Fetch recent revisions and sort client-side (API doesn't support orderBy)
+    revs = drive.revisions().list(
+        fileId=file_id,
+        pageSize=100,
+        fields="revisions(id, modifiedTime)"
+    ).execute().get("revisions", [])
+
+    if not revs:
+        raise ValueError("No revisions found to label.")
+
+    revs.sort(key=lambda r: r.get("modifiedTime", ""))
+    head_rev = revs[-1]["id"]
+    
+    drive.revisions().update(
+        fileId=file_id,
+        revisionId=head_rev,
+        body={"keepForever": True, "name": label}
+    ).execute()
