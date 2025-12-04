@@ -19,12 +19,12 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 # --- Constants ---
-WRITE_DELAY = 0.2
+WRITE_DELAY = 0.55
 DIM_BLEND_FACTOR = 0.30
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 # --- Helpers ---
-_money_re = re.compile(r"[€$£]\s*")
+_money_re = re.compile(r"[€$£₤¥₩₹ƒ'ª¶œ]\s*")
 _only_digits_comma_dot = re.compile(r"^[\d\.,]+$")
 
 def _to_number_if_possible(val: Any) -> Any:
@@ -33,13 +33,35 @@ def _to_number_if_possible(val: Any) -> Any:
     s = str(val).strip()
     if not s: return ""
     s = _money_re.sub("", s).strip()
+    
     if _only_digits_comma_dot.match(s):
-        last_comma, last_dot = s.rfind(","), s.rfind(".")
+        # Check for multiple occurrences of separators (indicates thousands)
+        comma_count = s.count(",")
+        dot_count = s.count(".")
+        
+        if comma_count > 1 and dot_count == 0:
+            # English millions: 1,000,000 -> 1000000
+            return float(s.replace(",", ""))
+        if dot_count > 1 and comma_count == 0:
+            # German millions: 1.000.000 -> 1000000
+            return float(s.replace(".", ""))
+            
+        last_comma = s.rfind(",")
+        last_dot = s.rfind(".")
+        
         if last_comma > -1 and last_dot > -1:
-            if last_comma > last_dot: s = s.replace(".", "").replace(",", ".")
-            else: s = s.replace(",", "")
+            # Both present: determine which is decimal based on position
+            if last_comma > last_dot: 
+                # German: 1.000,00 -> 1000.00
+                s = s.replace(".", "").replace(",", ".")
+            else: 
+                # English: 1,000.00 -> 1000.00
+                s = s.replace(",", "")
         elif last_comma > -1:
+            # Only comma. Ambiguous: 1,000 (Eng) or 1,5 (Ger)
+            # We assume German decimal (1,5 -> 1.5) as it's safer for currency
             s = s.replace(",", ".")
+            
         try: return float(s)
         except Exception: pass
     try: return float(s)
@@ -107,6 +129,14 @@ def is_white(color: Optional[Dict[str, float]]) -> bool:
     b = color.get('blue', 0.0)
     return r > 0.9 and g > 0.9 and b > 0.9
 
+def _prepare_for_write(val: Any):
+    num = _to_number_if_possible(val)
+    if isinstance(num, float):
+        return num  # keep numeric so existing currency format in the sheet applies
+    if num is None or num == "":
+        return ""
+    return str(num)
+
 # --- Clients ---
 
 class SheetsClient:
@@ -170,7 +200,7 @@ class SheetsClient:
         if not updates: return
         sh = self._open_sheet(spreadsheet_id)
         ws = sh.worksheet(worksheet_title)
-        data = [{"range": f"'{ws.title}'!{a1_cell(r, c)}", "values": [[str(v) if v is not None else ""]]} for r, c, v in updates]
+        data = [{"range": f"'{ws.title}'!{a1_cell(r, c)}", "values": [[_prepare_for_write(v)]]} for r, c, v in updates]
         self._retry_api(ws.spreadsheet.values_batch_update, body={"valueInputOption": "USER_ENTERED", "data": data})
 
     def duplicate_worksheet(self, spreadsheet_id: str, worksheet_title: str, new_title: str):
@@ -178,6 +208,13 @@ class SheetsClient:
         ws = sh.worksheet(worksheet_title)
         # Insert after the current worksheet
         self._retry_api(ws.duplicate, new_sheet_name=new_title, insert_sheet_index=ws.index + 1)
+
+    def insert_rows(self, spreadsheet_id: str, worksheet_title: str, values: List[List[Any]], row_index: int):
+        """Inserts multiple rows at the specified index (1-based)."""
+        if not values: return
+        sh = self._open_sheet(spreadsheet_id)
+        ws = sh.worksheet(worksheet_title)
+        self._retry_api(ws.insert_rows, values, row=row_index, value_input_option="USER_ENTERED")
 
     def copy_spreadsheet(self, spreadsheet_id: str, title: str):
         """Copies the entire spreadsheet file."""
@@ -352,8 +389,11 @@ def colors_match(c1: Optional[Dict], c2: Optional[Dict], tolerance: float = 0.03
             abs(g1 - g2) <= tolerance and 
             abs(b1 - b2) <= tolerance)
 
-def compare_sheet_colors(result: CompareResult, s_formats: List[Dict], t_formats: List[Dict], s_h: List[str], t_h: List[str], included_h: List[str]) -> List[str]:
-    report = []
+def get_color_mismatches(result: CompareResult, s_formats: List[Dict], t_formats: List[Dict], s_h: List[str], t_h: List[str], included_h: List[str]) -> List[Tuple[int, int, Dict, str]]:
+    """
+    Returns a list of mismatches: (target_row_0based, target_col_0based, source_color_dict, description)
+    """
+    mismatches = []
     src_hmap = {h: i for i, h in enumerate(s_h)}
     tgt_hmap = {h: i for i, h in enumerate(t_h)}
     
@@ -393,9 +433,15 @@ def compare_sheet_colors(result: CompareResult, s_formats: List[Dict], t_formats
                     tr, tg, tb = get_color_tuple(t_color)
                     desc = f"RGB Mismatch: Src({sr:.2f},{sg:.2f},{sb:.2f}) vs Tgt({tr:.2f},{tg:.2f},{tb:.2f})"
                 
-                report.append(f"[COLOR DIFF] Cell {cell_ref} (Row {t_row}, {h}): {desc}")
+                # Use WHITE constant if source is effectively white, to ensure clean write
+                final_s_color = WHITE if s_white else s_color
+                mismatches.append((t_row - 1, t_col, final_s_color, f"[COLOR DIFF] Cell {cell_ref} (Row {t_row}, {h}): {desc}"))
                     
-    return sorted(report)
+    return mismatches
+
+def compare_sheet_colors(result: CompareResult, s_formats: List[Dict], t_formats: List[Dict], s_h: List[str], t_h: List[str], included_h: List[str]) -> List[str]:
+    mismatches = get_color_mismatches(result, s_formats, t_formats, s_h, t_h, included_h)
+    return sorted([m[3] for m in mismatches])
 
 def label_current_revision(credentials_path: str, file_id: str, label: str):
     creds = Credentials.from_service_account_file(credentials_path, scopes=[

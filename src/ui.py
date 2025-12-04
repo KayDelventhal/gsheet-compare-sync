@@ -5,6 +5,7 @@ PySide6 UI for CompareAndSyncSheets.
 import os
 import json
 import re
+import time
 import datetime as dt
 from datetime import datetime
 from typing import Optional, List, Any, Tuple
@@ -19,7 +20,8 @@ from PySide6.QtGui import QPixmap, QColor
 
 from src.logic import (
     SheetsClient, TSVClient, compare_two_sheets, check_color_status, compare_sheet_colors,
-    WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white, label_current_revision
+    WHITE, DIM_BLEND_FACTOR, rgb_to_hsv, hsv_to_rgb, is_white, label_current_revision,
+    get_color_mismatches, get_bg_color
 )
 
 # --- Constants ---
@@ -85,6 +87,8 @@ class CompareSyncUI(QWidget):
         
         self.key_header = QComboBox()
         self.refresh_headers_btn = QPushButton("Load Headers")
+        self.sel_all_btn = QPushButton("Sel. All")
+        self.sel_none_btn = QPushButton("Sel. None")
         
         # ListWidget as Grid
         self.compare_list = QListWidget()
@@ -111,6 +115,10 @@ class CompareSyncUI(QWidget):
         self.check_rows_btn = QPushButton("Check Rows")
         self.check_cols_btn = QPushButton("Check Cols")
         self.check_color_btn = QPushButton("Check Colors")
+        
+        self.add_missing_src_btn = QPushButton("Add Missing Rows to Source")
+        self.add_missing_tgt_btn = QPushButton("Add Missing Rows to Target")
+        
         self.highlight_btn = QPushButton("Color all Diffs")
         self.sync_data_btn = QPushButton("Sync Data")
         self.sync_color_btn = QPushButton("Sync Color")
@@ -180,8 +188,8 @@ class CompareSyncUI(QWidget):
         header_ctrl_layout.addWidget(self.update_marker_combo, 2)
         header_ctrl_layout.addWidget(self.refresh_headers_btn)
         header_ctrl_layout.addStretch(1)
-        header_ctrl_layout.addWidget(self.load_all)
-        header_ctrl_layout.addWidget(self.save_all)
+        header_ctrl_layout.addWidget(self.sel_all_btn)
+        header_ctrl_layout.addWidget(self.sel_none_btn)
         key_layout.addLayout(header_ctrl_layout)
         
         # Columns Grid
@@ -189,13 +197,24 @@ class CompareSyncUI(QWidget):
         
         root_layout.addWidget(key_box)
         
+        # Config/Versioning Row
+        config_ver_row = QHBoxLayout()
+        
+        # Config Controls
+        config_box_new = QGroupBox("Config")
+        config_layout_new = QHBoxLayout(config_box_new)
+        config_layout_new.addWidget(self.load_all)
+        config_layout_new.addWidget(self.save_all)
+        config_ver_row.addWidget(config_box_new)
+        
         # Version/Snapshot Controls
         version_box = QGroupBox("Versioning")
         version_layout = QHBoxLayout(version_box)
         version_layout.addWidget(self.snapshot_btn)
         version_layout.addWidget(self.backup_btn)
+        config_ver_row.addWidget(version_box)
         
-        root_layout.addWidget(version_box)
+        root_layout.addLayout(config_ver_row)
         
         # Actions
         main_action_box = QGroupBox("Main Actions")
@@ -215,17 +234,24 @@ class CompareSyncUI(QWidget):
         color_mgmt_row.addWidget(self.tgt_dim_colors_btn)
         main_action_layout.addLayout(color_mgmt_row)
 
-        # Row 2: Main Operations
-        ops_row = QHBoxLayout()
-        ops_row.addWidget(self.check_btn)
-        ops_row.addWidget(self.check_rows_btn)
-        ops_row.addWidget(self.check_cols_btn)
-        ops_row.addWidget(self.check_color_btn)
-        ops_row.addWidget(self.highlight_btn)
-        ops_row.addWidget(self.sync_data_btn)
-        ops_row.addWidget(self.sync_color_btn)
-        ops_row.addWidget(self.sync_btn)
-        main_action_layout.addLayout(ops_row)
+        # Row 2: Checks
+        checks_row = QHBoxLayout()
+        checks_row.addWidget(self.check_rows_btn)
+        checks_row.addWidget(self.check_cols_btn)
+        checks_row.addWidget(self.check_btn)
+        checks_row.addWidget(self.check_color_btn)
+        main_action_layout.addLayout(checks_row)
+
+        # Row 3: Fixes & Syncs
+        syncs_row = QHBoxLayout()
+        syncs_row.addWidget(self.add_missing_src_btn)
+        syncs_row.addWidget(self.add_missing_tgt_btn)
+        syncs_row.addStretch(1)
+        syncs_row.addWidget(self.highlight_btn)
+        syncs_row.addWidget(self.sync_data_btn)
+        syncs_row.addWidget(self.sync_color_btn)
+        syncs_row.addWidget(self.sync_btn)
+        main_action_layout.addLayout(syncs_row)
         
         root_layout.addWidget(main_action_box)
 
@@ -243,11 +269,21 @@ class CompareSyncUI(QWidget):
         report_layout.addWidget(self.progress)
         root_layout.addWidget(report_box, 1)
 
+    def _select_all_columns(self):
+        for i in range(self.compare_list.count()):
+            self.compare_list.item(i).setCheckState(Qt.Checked)
+
+    def _select_no_columns(self):
+        for i in range(self.compare_list.count()):
+            self.compare_list.item(i).setCheckState(Qt.Unchecked)
+
     def _wire_signals(self):
         self.busy.connect(self._set_busy)
         self.cred_btn.clicked.connect(self._pick_credentials)
         self.load_all.clicked.connect(self._load_all_data)
         self.save_all.clicked.connect(self._save_ui_state)
+        self.sel_all_btn.clicked.connect(self._select_all_columns)
+        self.sel_none_btn.clicked.connect(self._select_no_columns)
         self.connect_btn.clicked.connect(self._connect)
         self.src_type.currentTextChanged.connect(self._refresh_source_visibility)
         self.load_src_btn.clicked.connect(self._load_src_tabs)
@@ -264,11 +300,14 @@ class CompareSyncUI(QWidget):
         self.check_rows_btn.clicked.connect(self._check_rows_only)
         self.check_cols_btn.clicked.connect(self._check_cols_only)
         self.check_btn.clicked.connect(self._check_only)
+        
+        self.add_missing_src_btn.clicked.connect(lambda: self._add_missing_rows("source"))
+        self.add_missing_tgt_btn.clicked.connect(lambda: self._add_missing_rows("target"))
         self.check_color_btn.clicked.connect(self._check_color_only)
-        self.highlight_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True))
-        self.sync_data_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=False))
-        self.sync_color_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True))
-        self.sync_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=True))
+        self.highlight_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True, sync_source_colors=False))
+        self.sync_data_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=False, sync_source_colors=False))
+        self.sync_color_btn.clicked.connect(lambda: self._run(sync_data=False, sync_color=True, sync_source_colors=True))
+        self.sync_btn.clicked.connect(lambda: self._run(sync_data=True, sync_color=True, sync_source_colors=True))
         
         self.report_clear_btn.clicked.connect(self.report.clear)
         self.log_load_btn.clicked.connect(self._load_log_file)
@@ -468,6 +507,182 @@ class CompareSyncUI(QWidget):
         finally:
             self.busy.emit(False)
 
+    def _add_missing_rows(self, target_kind: str):
+        """
+        Adds missing rows to the specified target (source or target).
+        Preserves order relative to the 'other' sheet.
+        """
+        if target_kind == "source" and self.src_type.currentText() != "Google Sheet":
+            QMessageBox.warning(self, "Not Supported", "Cannot add rows to a TSV source.")
+            return
+
+        self.busy.emit(True)
+        try:
+            key, included, sid, stab, tid, ttab, is_source_sheet, update_marker_col = self._get_run_params()
+            s_h, s_r = self._load_table("source")
+            t_h, t_r = self._load_table("target")
+            result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
+            
+            missing_keys = []
+            other_rows = [] # The reference rows (from the other sheet)
+            other_hmap = {}
+            target_hmap = {}
+            target_sheet_id = ""
+            target_tab_name = ""
+            
+            if target_kind == "target":
+                missing_keys = result.missing_rows_in_target
+                other_rows = s_r
+                other_hmap = {h: i for i, h in enumerate(s_h)}
+                target_hmap = {h: i for i, h in enumerate(t_h)}
+                target_sheet_id = tid
+                target_tab_name = ttab
+                other_sheet_id = sid if is_source_sheet else None
+                other_tab_name = stab if is_source_sheet else None
+            else: # source
+                missing_keys = result.missing_rows_in_source
+                other_rows = t_r
+                other_hmap = {h: i for i, h in enumerate(t_h)}
+                target_hmap = {h: i for i, h in enumerate(s_h)}
+                target_sheet_id = sid
+                target_tab_name = stab
+                other_sheet_id = tid
+                other_tab_name = ttab
+
+            if not missing_keys:
+                QMessageBox.information(self, "No Missing Rows", f"No missing rows found in {target_kind}.")
+                return
+
+            self.report.append(f"Found {len(missing_keys)} missing rows. Starting insertion...")
+            QApplication.processEvents()
+
+            # Fetch formats from "other" if it's a sheet
+            other_formats = []
+            if other_sheet_id and other_tab_name:
+                 try:
+                     other_formats = self.client.fetch_formats(other_sheet_id, other_tab_name)
+                 except Exception as e:
+                     print(f"Warning: Could not fetch formats from other sheet: {e}")
+
+            # Prepare data for insertion
+            # We iterate through the 'other' rows (reference order)
+            # If we find a key that is missing in 'target', we insert it.
+            # We track the insertion index.
+            
+            # 1. Get current target sheet ID for API calls
+            sh = self.client._open_sheet(target_sheet_id)
+            ws = sh.worksheet(target_tab_name)
+            ws_id = ws.id
+            
+            # 2. Calculate insertion points
+            # We assume the target rows are roughly in order or we just append if not found.
+            # But to preserve relative order, we use the 'other' sheet as the guide.
+            
+            # Map existing keys in target to their row index (1-based)
+            # We need to re-scan target to get current indices if we want to be safe, 
+            # but result.row_mapping has the indices from the load.
+            # row_mapping: key -> (s_row, t_row)
+            
+            existing_key_indices = {}
+            if target_kind == "target":
+                for k, (sr, tr) in result.row_mapping.items(): existing_key_indices[k] = tr
+            else:
+                for k, (sr, tr) in result.row_mapping.items(): existing_key_indices[k] = sr
+                
+            # Key column index in 'other' and 'target'
+            other_key_idx = other_hmap[key]
+            target_key_idx = target_hmap[key]
+            
+            # We will collect insertions. 
+            # Since inserting one by one shifts indices, we need to track the shift.
+            
+            shift = 0
+            last_insert_idx = 2 # Start after header
+            
+            rows_inserted = 0
+            all_color_reqs = []
+            
+            # Iterate through reference rows (Source if adding to Target, Target if adding to Source)
+            for i, row in enumerate(other_rows):
+                if other_key_idx >= len(row): continue
+                k_val = str(row[other_key_idx]).strip()
+                if not k_val: continue
+                
+                if k_val in existing_key_indices:
+                    # This row exists in target. Update our cursor.
+                    # The row is at `original_index + shift`
+                    original_idx = existing_key_indices[k_val]
+                    current_idx = original_idx + shift
+                    last_insert_idx = current_idx + 1
+                elif k_val in missing_keys:
+                    # This row is missing. Insert at `last_insert_idx`.
+                    
+                    # Build the new row
+                    new_row = [""] * len(target_hmap)
+                    
+                    # Fill Key
+                    new_row[target_key_idx] = k_val
+                    
+                    # Fill Included Columns
+                    for col_name in included:
+                        if col_name in other_hmap and col_name in target_hmap:
+                            val = row[other_hmap[col_name]]
+                            new_row[target_hmap[col_name]] = val
+                            
+                    # Fill Marker if set
+                    if update_marker_col and update_marker_col in target_hmap:
+                        new_row[target_hmap[update_marker_col]] = f"UPDATE {datetime.now().strftime('%y%m%d')}"
+                        
+                    # Insert
+                    self.client.insert_rows(target_sheet_id, target_tab_name, [new_row], last_insert_idx)
+                    
+                    self.report.append(f"[{rows_inserted + 1}/{len(missing_keys)}] Inserted row '{k_val}'")
+                    QApplication.processEvents()
+
+                    time.sleep(0.95) # Throttle to avoid 429 Quota Exceeded
+                    
+                    # Color the inserted row
+                    # The row is now at `last_insert_idx`.
+                    # We want to color the cells we touched (Key + Included + Marker)
+                    
+                    # Helper to get color for current row i and column col_idx
+                    def get_col_color(col_idx):
+                        if i < len(other_formats):
+                            return get_bg_color(other_formats[i], col_idx)
+                        return None # Default/White
+
+                    # Key
+                    key_color = get_col_color(other_key_idx) or WHITE
+                    all_color_reqs.append(self._create_color_request(ws_id, last_insert_idx - 1, target_key_idx, key_color))
+                    
+                    # Included
+                    for col_name in included:
+                        if col_name in target_hmap:
+                            if col_name in other_hmap:
+                                c_color = get_col_color(other_hmap[col_name]) or WHITE
+                                all_color_reqs.append(self._create_color_request(ws_id, last_insert_idx - 1, target_hmap[col_name], c_color))
+                            
+                    # Marker
+                    if update_marker_col and update_marker_col in target_hmap:
+                        all_color_reqs.append(self._create_color_request(ws_id, last_insert_idx - 1, target_hmap[update_marker_col], WHITE))
+                        
+                    shift += 1
+                    last_insert_idx += 1
+                    rows_inserted += 1
+            
+            if all_color_reqs:
+                self.client.batch_update(target_sheet_id, {'requests': all_color_reqs})
+                    
+            QMessageBox.information(self, "Add Missing Complete", f"Inserted {rows_inserted} rows into {target_kind}.")
+            self._write_log(f"Added {rows_inserted} missing rows to {target_kind}.")
+            self._save_ui_state()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self._set_status_color("red")
+        finally:
+            self.busy.emit(False)
+
     def _check_cols_only(self):
         self.busy.emit(True)
         try:
@@ -562,7 +777,7 @@ class CompareSyncUI(QWidget):
         finally:
             self.busy.emit(False)
 
-    def _run(self, sync_data: bool, sync_color: bool):
+    def _run(self, sync_data: bool, sync_color: bool, sync_source_colors: bool = False):
         self.busy.emit(True)
         try:
             key, included, sid, stab, tid, ttab, is_source_sheet, update_marker_col = self._get_run_params()
@@ -571,8 +786,17 @@ class CompareSyncUI(QWidget):
             result = compare_two_sheets(s_h, s_r, t_h, t_r, key, included)
             self.report.append(result.to_report())
 
-            if not result.differences:
-                QMessageBox.information(self, "No Differences", "No data differences found to update.")
+            # If we are syncing source colors, we need to check for color mismatches even if data is identical
+            color_mismatches = []
+            if sync_source_colors and is_source_sheet:
+                current_formats = self.client.fetch_formats(tid, ttab)
+                src_formats = self.client.fetch_formats(sid, stab)
+                color_mismatches = get_color_mismatches(result, src_formats, current_formats, s_h, t_h, included)
+                if color_mismatches:
+                    self.report.append(f"\nFound {len(color_mismatches)} color mismatches to sync.")
+
+            if not result.differences and not color_mismatches:
+                QMessageBox.information(self, "No Differences", "No data or color differences found to update.")
                 self._save_ui_state()
                 return
 
@@ -596,6 +820,7 @@ class CompareSyncUI(QWidget):
                 src_ws = src_sh.worksheet(stab)
                 src_sheet_id = src_ws.id
 
+            # 1. Handle Data Differences (Highlighting)
             for key_val, diffs in result.differences.items():
                 row_log_entries = []
                 s_row_idx = diffs[0][3]
@@ -607,6 +832,7 @@ class CompareSyncUI(QWidget):
                         row_log_entries.append(f"  - {h}: '{t_val}' -> '{s_val}'")
 
                     if sync_color:
+                        # Highlight data difference with Base Color (e.g. Yellow)
                         tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, t_row_idx - 1, t_col, base_color))
 
                         if is_source_sheet:
@@ -643,25 +869,60 @@ class CompareSyncUI(QWidget):
                 if row_log_entries:
                     log_entries.append(f"Row [{key_val}]:\n" + "\n".join(row_log_entries))
 
-            if sync_data: 
-                self.client.batch_update_values(tid, ttab, value_updates)
-                if src_value_updates:
-                    self.client.batch_update_values(sid, stab, src_value_updates)
+            # 2. Handle Color Mismatches (Syncing Source Colors)
+            if sync_source_colors and color_mismatches:
+                for t_row_0, t_col_0, s_color, desc in color_mismatches:
+                    # Add request to set Target cell to Source Color
+                    tgt_color_reqs.append(self._create_color_request(tgt_sheet_id, t_row_0, t_col_0, s_color))
+                    log_entries.append(f"Color Sync: {desc}")
 
-            if sync_color:
-                if tgt_color_reqs: self.client.batch_update(tid, {'requests': tgt_color_reqs})
-                if src_color_reqs: self.client.batch_update(sid, {'requests': src_color_reqs})
+            # Helper for chunked execution with progress
+            def process_in_chunks(items, action_name, processor_func):
+                chunk_size = 50
+                total = len(items)
+                if total == 0: return
+                
+                self.report.append(f"Starting {action_name} ({total} items)...")
+                QApplication.processEvents()
+                
+                for i in range(0, total, chunk_size):
+                    chunk = items[i:i + chunk_size]
+                    processor_func(chunk)
+                    self.report.append(f"  - Processed {min(i + chunk_size, total)}/{total}")
+                    QApplication.processEvents()
+                    time.sleep(0.5) # Throttle
+
+            if sync_data: 
+                process_in_chunks(value_updates, "Target Data Sync", 
+                                  lambda c: self.client.batch_update_values(tid, ttab, c))
+                if src_value_updates:
+                    process_in_chunks(src_value_updates, "Source Data Sync", 
+                                      lambda c: self.client.batch_update_values(sid, stab, c))
+
+            if sync_color or sync_source_colors:
+                self.report.append(f"DEBUG: Base Color: {self.base_color_combo.currentText()} {base_color}")
+                self.report.append(f"DEBUG: Generated {len(tgt_color_reqs)} color requests for Target.")
+                if is_source_sheet:
+                    self.report.append(f"DEBUG: Generated {len(src_color_reqs)} color requests for Source.")
+
+                if tgt_color_reqs: 
+                    process_in_chunks(tgt_color_reqs, "Target Color Sync", 
+                                      lambda c: self.client.batch_update(tid, {'requests': c}))
+                if src_color_reqs: 
+                    process_in_chunks(src_color_reqs, "Source Color Sync", 
+                                      lambda c: self.client.batch_update(sid, {'requests': c}))
 
             action_parts = []
             if sync_data: action_parts.append("Synced")
             if sync_color: action_parts.append("Colored")
+            if sync_source_colors: action_parts.append("Color-Matched")
             action = " & ".join(action_parts) if action_parts else "Checked"
             
-            summary_message = f"{action} {len(result.differences)} rows with differences."
+            summary_message = f"{action} {len(result.differences)} data diffs, {len(color_mismatches)} color diffs."
             QMessageBox.information(self, "Run Complete", summary_message)
             
-            if sync_data and log_entries:
-                log_header = f"Ran 'Sync' on {len(log_entries)} rows."
+            if (sync_data or sync_source_colors) and log_entries:
+                log_header = f"Ran 'Sync' on {len(log_entries)} items."
                 self._write_log(f"{log_header}\n{'\n'.join(log_entries)}")
             else:
                  self._write_log(summary_message)
