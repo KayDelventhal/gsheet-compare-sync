@@ -111,7 +111,7 @@ class CompareSyncUI(QWidget):
         self.snapshot_btn = QPushButton("Snapshot Tab")
         self.backup_btn = QPushButton("Create Version")
         
-        self.check_btn = QPushButton("Check Diffs")
+        self.check_btn = QPushButton("Check Data")
         self.check_rows_btn = QPushButton("Check Rows")
         self.check_cols_btn = QPushButton("Check Cols")
         self.check_color_btn = QPushButton("Check Colors")
@@ -119,7 +119,7 @@ class CompareSyncUI(QWidget):
         self.add_missing_src_btn = QPushButton("Add Missing Rows to Source")
         self.add_missing_tgt_btn = QPushButton("Add Missing Rows to Target")
         
-        self.highlight_btn = QPushButton("Color all Diffs")
+        self.highlight_btn = QPushButton("Color all Data Diffs")
         self.sync_data_btn = QPushButton("Sync Data")
         self.sync_color_btn = QPushButton("Sync Color")
         self.sync_btn = QPushButton("Sync Data and Color")
