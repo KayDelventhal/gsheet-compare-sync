@@ -12,9 +12,12 @@ temp.*
 sheetaccess-416516-0aae3b002a6c.json
 
 # Byte-compiled / optimized / DLL files
-__pycache__/
+__pycache__/*
+*/__pycache__/*
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
 
 # C extensions
 *.so
